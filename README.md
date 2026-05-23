@@ -1,6 +1,8 @@
 ![Traymond](https://github.com/fcFn/fcFn.github.io/blob/master/images/logos/traymond_logo.png) Traymond
 =======
 
+[中文文档](README.zh.md)
+
 A very simple app for minimizing any window to tray as an icon. Runs in the background.
 
 In case it terminates unexpectedly, restart the app and all the icons for minimized windows will come back.
