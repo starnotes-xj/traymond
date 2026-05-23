@@ -22,7 +22,7 @@ jobs:
         uses: microsoft/setup-msbuild@v2
 
       - name: Build ${{ matrix.configuration }}
-        run: msbuild traymond.sln /p:Configuration=${{ matrix.configuration }} /p:Platform=Win32 /m /nologo
+        run: msbuild traymond.sln /p:Configuration=${{ matrix.configuration }} /p:Platform=x86 /m /nologo
 
       - name: Upload artifact
         if: matrix.configuration == 'Release'
