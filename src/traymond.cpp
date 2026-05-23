@@ -89,7 +89,7 @@ void showWindow(TRCONTEXT *context, LPARAM lParam) {
 // Uses currently focused window unless supplied a handle as the argument.
 void minimizeToTray(TRCONTEXT *context, long restoreWindow) {
   // Taskbar, desktop, and invisible Chromium root/system windows are restricted.
-  const char restrictWins[][26] = {
+  const char* restrictWins[] = {
     "WorkerW", "Shell_TrayWnd", "Chrome_WidgetWin_0",
     "Windows.UI.Core.CoreWindow", "Progman", "MSCTFIME UI", "Default IME"
   };
