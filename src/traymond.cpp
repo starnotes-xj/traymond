@@ -18,6 +18,7 @@
 typedef struct HIDDEN_WINDOW {
   NOTIFYICONDATA icon;
   HWND window;
+  LONG_PTR savedExStyle; // original extended style, restored on un-hide
 } HIDDEN_WINDOW;
 
 // Current execution context
@@ -26,6 +27,7 @@ typedef struct TRCONTEXT {
   HIDDEN_WINDOW icons[MAXIMUM_WINDOWS];
   HMENU trayMenu;
   int iconIndex; // How many windows are currently hidden
+  UINT nextIconId; // Monotonically increasing tray icon ID (1..0xFFFF)
 } TRCONTEXT;
 
 HANDLE saveFile;
@@ -59,6 +61,9 @@ void showWindow(TRCONTEXT *context, LPARAM lParam) {
   for (int i = 0; i < context->iconIndex; i++)
   {
     if (context->icons[i].icon.uID == HIWORD(lParam)) {
+      // Restore original extended window style before making visible
+      if (context->icons[i].savedExStyle)
+        SetWindowLongPtr(context->icons[i].window, GWL_EXSTYLE, context->icons[i].savedExStyle);
       ShowWindow(context->icons[i].window, SW_SHOW);
       Shell_NotifyIcon(NIM_DELETE, &context->icons[i].icon);
       SetForegroundWindow(context->icons[i].window);
@@ -83,18 +88,28 @@ void showWindow(TRCONTEXT *context, LPARAM lParam) {
 // Minimizes the current window to tray.
 // Uses currently focused window unless supplied a handle as the argument.
 void minimizeToTray(TRCONTEXT *context, long restoreWindow) {
-  // Taskbar and desktop windows are restricted from hiding.
-  const char restrictWins[][14] = { {"WorkerW"}, {"Shell_TrayWnd"} };
+  // Taskbar, desktop, and invisible Chromium root/system windows are restricted.
+  const char restrictWins[][26] = {
+    "WorkerW", "Shell_TrayWnd", "Chrome_WidgetWin_0",
+    "Windows.UI.Core.CoreWindow", "Progman", "MSCTFIME UI", "Default IME"
+  };
 
   HWND currWin = 0;
   if (!restoreWindow) {
     currWin = GetForegroundWindow();
+    // Walk up to the true root window; skips child/popup sub-windows in
+    // Chromium's multi-window architecture (e.g. IME, PiP, overlay widgets).
+    if (currWin)
+      currWin = GetAncestor(currWin, GA_ROOT);
   }
   else {
     currWin = reinterpret_cast<HWND>(restoreWindow);
   }
 
-  if (!currWin) {
+  if (!currWin || !IsWindowVisible(currWin)) {
+    return;
+  }
+  if (GetWindowLongPtr(currWin, GWL_STYLE) & WS_CHILD) {
     return;
   }
 
@@ -114,6 +129,7 @@ void minimizeToTray(TRCONTEXT *context, long restoreWindow) {
     MessageBox(NULL, "Error! Too many hidden windows. Please unhide some.", "Traymond", MB_OK | MB_ICONERROR);
     return;
   }
+
   ULONG_PTR icon = GetClassLongPtr(currWin, GCLP_HICONSM);
   if (!icon) icon = SendMessage(currWin, WM_GETICON, 2, NULL); // ICON_SMALL2
   if (!icon) icon = SendMessage(currWin, WM_GETICON, 0, NULL); // ICON_SMALL
@@ -122,25 +138,57 @@ void minimizeToTray(TRCONTEXT *context, long restoreWindow) {
   if (!icon) icon = (ULONG_PTR)LoadIcon(NULL, IDI_APPLICATION);
   if (!icon) return;
 
+  // Use a monotonically increasing ID to avoid LOWORD(HWND) collisions that
+  // silently fail Shell_NotifyIcon(NIM_ADD) when two HWNDs share low 16 bits.
+  if (context->nextIconId >= 0xFFFF) context->nextIconId = 0;
+  UINT iconId = ++context->nextIconId;
+
   NOTIFYICONDATA nid;
   nid.cbSize = sizeof(NOTIFYICONDATA);
   nid.hWnd = context->mainWindow;
   nid.hIcon = (HICON)icon;
   nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
   nid.uVersion = NOTIFYICON_VERSION_4;
-  nid.uID = LOWORD(reinterpret_cast<UINT>(currWin));
+  nid.uID = iconId;
   nid.uCallbackMessage = WM_ICON;
   GetWindowText(currWin, nid.szTip, 128);
+
+  if (!Shell_NotifyIcon(NIM_ADD, &nid)) {
+    return;
+  }
+  Shell_NotifyIcon(NIM_SETVERSION, &nid);
+
+  LONG_PTR savedExStyle = GetWindowLongPtr(currWin, GWL_EXSTYLE);
+  ShowWindow(currWin, SW_HIDE);
+
+  // Verify the hide actually succeeded. It can be silently rejected by UIPI
+  // when the target process runs at a higher integrity level (e.g. admin).
+  if (IsWindowVisible(currWin)) {
+    Shell_NotifyIcon(NIM_DELETE, &nid);
+    static bool shownUipiWarning = false;
+    if (!shownUipiWarning) {
+      shownUipiWarning = true;
+      MessageBox(NULL,
+        "Could not hide window.\n\nIf the target application runs as administrator, Traymond must also run as administrator.",
+        "Traymond", MB_OK | MB_ICONWARNING);
+    }
+    return;
+  }
+
+  // Strip WS_EX_APPWINDOW and add WS_EX_TOOLWINDOW so the window stays off
+  // the taskbar even if the application's own code calls ShowWindow again
+  // (e.g. Electron apps that listen to the 'hide' event and re-show).
+  SetWindowLongPtr(currWin, GWL_EXSTYLE,
+    (savedExStyle | WS_EX_TOOLWINDOW) & ~WS_EX_APPWINDOW);
+
   context->icons[context->iconIndex].icon = nid;
   context->icons[context->iconIndex].window = currWin;
+  context->icons[context->iconIndex].savedExStyle = savedExStyle;
   context->iconIndex++;
-  Shell_NotifyIcon(NIM_ADD, &nid);
-  Shell_NotifyIcon(NIM_SETVERSION, &nid);
-  ShowWindow(currWin, SW_HIDE);
+
   if (!restoreWindow) {
     save(context);
   }
-
 }
 
 // Adds our own icon to tray
@@ -150,7 +198,7 @@ void createTrayIcon(HWND mainWindow, HINSTANCE hInstance, NOTIFYICONDATA* icon) 
   icon->hIcon = LoadIcon(hInstance, MAKEINTRESOURCE(101));
   icon->uFlags = NIF_ICON | NIF_TIP | NIF_SHOWTIP | NIF_MESSAGE;
   icon->uVersion = NOTIFYICON_VERSION_4;
-  icon->uID = reinterpret_cast<UINT>(mainWindow);
+  icon->uID = 1; // Reserved for Traymond's own tray icon; hidden-window IDs start at 2
   icon->uCallbackMessage = WM_OURICON;
   strcpy_s(icon->szTip, "Traymond");
   Shell_NotifyIcon(NIM_ADD, icon);
@@ -181,10 +229,13 @@ void createTrayMenu(HMENU* trayMenu) {
   InsertMenuItem(*trayMenu, 0, FALSE, &showAllMenuItem);
   InsertMenuItem(*trayMenu, 0, FALSE, &exitMenuItem);
 }
-// Shows all hidden windows;
+
+// Shows all hidden windows
 void showAllWindows(TRCONTEXT *context) {
   for (int i = 0; i < context->iconIndex; i++)
   {
+    if (context->icons[i].savedExStyle)
+      SetWindowLongPtr(context->icons[i].window, GWL_EXSTYLE, context->icons[i].savedExStyle);
     ShowWindow(context->icons[i].window, SW_SHOW);
     Shell_NotifyIcon(NIM_DELETE, &context->icons[i].icon);
     context->icons[i] = {};
@@ -294,6 +345,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 #pragma warning( pop )
 
   TRCONTEXT context = {};
+  context.nextIconId = 1; // 1 is reserved for Traymond's own icon; hidden windows start at 2
 
   NOTIFYICONDATA icon = {};
 
