@@ -115,12 +115,12 @@ void minimizeToTray(TRCONTEXT *context, long restoreWindow) {
     return;
   }
   ULONG_PTR icon = GetClassLongPtr(currWin, GCLP_HICONSM);
-  if (!icon) {
-    icon = SendMessage(currWin, WM_GETICON, 2, NULL);
-    if (!icon) {
-      return;
-    }
-  }
+  if (!icon) icon = SendMessage(currWin, WM_GETICON, 2, NULL); // ICON_SMALL2
+  if (!icon) icon = SendMessage(currWin, WM_GETICON, 0, NULL); // ICON_SMALL
+  if (!icon) icon = SendMessage(currWin, WM_GETICON, 1, NULL); // ICON_BIG
+  if (!icon) icon = GetClassLongPtr(currWin, GCLP_HICON);
+  if (!icon) icon = (ULONG_PTR)LoadIcon(NULL, IDI_APPLICATION);
+  if (!icon) return;
 
   NOTIFYICONDATA nid;
   nid.cbSize = sizeof(NOTIFYICONDATA);
