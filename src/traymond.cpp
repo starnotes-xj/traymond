@@ -228,7 +228,17 @@ void minimizeToTray(TRCONTEXT *context, long restoreWindow) {
     return;
   }
 
-  ULONG_PTR icon = GetClassLongPtr(currWin, GCLP_HICONSM);
+  // UWP / Microsoft Store apps use ApplicationFrameWindow as the outer shell;
+  // the real app icon lives on the inner Windows.UI.Core.CoreWindow child.
+  ULONG_PTR icon = 0;
+  if (strcmp(className, "ApplicationFrameWindow") == 0) {
+    HWND coreWin = FindWindowEx(currWin, NULL, "Windows.UI.Core.CoreWindow", NULL);
+    if (coreWin) {
+      icon = SendMessage(coreWin, WM_GETICON, 1, NULL); // ICON_BIG
+      if (!icon) icon = SendMessage(coreWin, WM_GETICON, 0, NULL); // ICON_SMALL
+    }
+  }
+  if (!icon) icon = GetClassLongPtr(currWin, GCLP_HICONSM);
   if (!icon) icon = SendMessage(currWin, WM_GETICON, 2, NULL); // ICON_SMALL2
   if (!icon) icon = SendMessage(currWin, WM_GETICON, 0, NULL); // ICON_SMALL
   if (!icon) icon = SendMessage(currWin, WM_GETICON, 1, NULL); // ICON_BIG
