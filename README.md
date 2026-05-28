@@ -38,6 +38,7 @@ Head to the [Releases](../../releases) page and download the latest `Traymond.ex
 | Item | Description |
 |------|-------------|
 | ☑ Auto-start at login | Toggle auto-start; a checkmark means it is enabled |
+| Language: English / 语言：中文 | Toggle the tray menu language |
 | Restore all windows | Restore every hidden window at once |
 | Exit | Exit Traymond and restore all hidden windows |
 
@@ -113,6 +114,8 @@ This fork extends [fcFn/traymond](https://github.com/fcFn/traymond) with the fol
 | Microsoft Store app support | Fixes silent early-exit caused by missing icons on `ApplicationFrameWindow`; reads icon from inner `CoreWindow` child |
 | UIPI privilege barrier | Detects cross-integrity-level hide failures and shows a clear diagnostic instead of silently doing nothing |
 | Tray icon ID collisions fixed | Monotonically increasing IDs replace `LOWORD(HWND)`, preventing silent `NIM_ADD` failures when multiple HWNDs share the same low 16 bits |
+| Robust single-window restore | Handles both modern and legacy tray callback ID formats, so double-click restore matches the same hidden window list used by Restore all |
+| English / Chinese tray menu | Adds a tray menu language toggle and persists the selected language |
 | Auto-start at login | Task Scheduler approach works for elevated apps; registry `Run` key does not |
 | Tray icon recovery | Listens for `TaskbarCreated` and re-adds the icon if explorer.exe restarts |
 | Stable save-file path | `traymond.dat` is always written next to the exe, not in whatever the current working directory happens to be |

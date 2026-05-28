@@ -20,9 +20,11 @@
 #define EXIT_ID     0x99
 #define SHOW_ALL_ID 0x98
 #define AUTOSTART_ID 0x97
+#define LANGUAGE_ID  0x96
 #define MAXIMUM_WINDOWS 100
 
 static const wchar_t TASK_NAME[] = L"Traymond";
+static const wchar_t SETTINGS_KEY[] = L"Software\\Traymond";
 
 // Stores hidden window record.
 typedef struct HIDDEN_WINDOW {
@@ -39,11 +41,69 @@ typedef struct TRCONTEXT {
   int iconIndex;         // How many windows are currently hidden
   UINT nextIconId;       // Monotonically increasing tray icon ID (starts at 2)
   NOTIFYICONDATA ownIcon; // Traymond's own tray icon; re-added on TaskbarCreated
+  bool chineseUi;
 } TRCONTEXT;
 
 HANDLE saveFile;
 char   g_datFilePath[MAX_PATH];  // Absolute path to traymond.dat
 UINT   g_taskbarCreatedMsg;      // RegisterWindowMessage("TaskbarCreated")
+
+typedef struct UI_TEXT {
+  const wchar_t* autostart;
+  const wchar_t* language;
+  const wchar_t* restoreAll;
+  const wchar_t* exit;
+} UI_TEXT;
+
+static const UI_TEXT UI_EN = {
+  L"Auto-start at login",
+  L"Language: English",
+  L"Restore all windows",
+  L"Exit"
+};
+
+static const UI_TEXT UI_ZH = {
+  L"开机自启动",
+  L"语言：中文",
+  L"恢复所有窗口",
+  L"退出"
+};
+
+static const UI_TEXT& uiText(const TRCONTEXT* context) {
+  return context->chineseUi ? UI_ZH : UI_EN;
+}
+
+static bool defaultChineseUi() {
+  return PRIMARYLANGID(GetUserDefaultUILanguage()) == LANG_CHINESE;
+}
+
+static bool loadChineseUi() {
+  HKEY key;
+  wchar_t value[8] = {};
+  DWORD valueSize = sizeof(value);
+  if (RegOpenKeyExW(HKEY_CURRENT_USER, SETTINGS_KEY, 0, KEY_READ, &key) == ERROR_SUCCESS) {
+    LONG result = RegQueryValueExW(key, L"Language", nullptr, nullptr,
+      reinterpret_cast<LPBYTE>(value), &valueSize);
+    RegCloseKey(key);
+    if (result == ERROR_SUCCESS) {
+      if (wcscmp(value, L"zh") == 0) return true;
+      if (wcscmp(value, L"en") == 0) return false;
+    }
+  }
+  return defaultChineseUi();
+}
+
+static void saveChineseUi(bool chineseUi) {
+  HKEY key;
+  if (RegCreateKeyExW(HKEY_CURRENT_USER, SETTINGS_KEY, 0, nullptr, 0,
+      KEY_SET_VALUE, nullptr, &key, nullptr) != ERROR_SUCCESS)
+    return;
+  const wchar_t* value = chineseUi ? L"zh" : L"en";
+  RegSetValueExW(key, L"Language", 0, REG_SZ,
+    reinterpret_cast<const BYTE*>(value),
+    (DWORD)((wcslen(value) + 1) * sizeof(wchar_t)));
+  RegCloseKey(key);
+}
 
 // ---------------------------------------------------------------------------
 // Task Scheduler helpers
@@ -171,17 +231,24 @@ void save(const TRCONTEXT *context) {
   }
 }
 
+static void restoreHiddenWindow(TRCONTEXT* context, int index, bool foreground) {
+  HIDDEN_WINDOW& hidden = context->icons[index];
+  if (hidden.savedExStyle)
+    SetWindowLongPtr(hidden.window, GWL_EXSTYLE, hidden.savedExStyle);
+  ShowWindow(hidden.window, SW_RESTORE);
+  Shell_NotifyIcon(NIM_DELETE, &hidden.icon);
+  if (foreground) {
+    SetForegroundWindow(hidden.window);
+    BringWindowToTop(hidden.window);
+  }
+  hidden = {};
+}
+
 // Restores a single hidden window.
-void showWindow(TRCONTEXT *context, LPARAM lParam) {
+void showWindow(TRCONTEXT *context, UINT iconId) {
   for (int i = 0; i < context->iconIndex; i++) {
-    if (context->icons[i].icon.uID == HIWORD(lParam)) {
-      if (context->icons[i].savedExStyle)
-        SetWindowLongPtr(context->icons[i].window, GWL_EXSTYLE,
-          context->icons[i].savedExStyle);
-      ShowWindow(context->icons[i].window, SW_SHOW);
-      Shell_NotifyIcon(NIM_DELETE, &context->icons[i].icon);
-      SetForegroundWindow(context->icons[i].window);
-      context->icons[i] = {};
+    if (context->icons[i].icon.uID == iconId) {
+      restoreHiddenWindow(context, i, true);
       std::vector<HIDDEN_WINDOW> temp(context->iconIndex);
       for (int j = 0, x = 0; j < context->iconIndex; j++) {
         if (context->icons[j].window) temp[x++] = context->icons[j];
@@ -193,6 +260,11 @@ void showWindow(TRCONTEXT *context, LPARAM lParam) {
       break;
     }
   }
+}
+
+static UINT trayCallbackIconId(WPARAM wParam, LPARAM lParam) {
+  UINT iconId = HIWORD(lParam);
+  return iconId ? iconId : (UINT)wParam;
 }
 
 // Minimizes the current window to tray.
@@ -309,24 +381,35 @@ void createTrayIcon(HWND mainWindow, HINSTANCE hInstance, TRCONTEXT* context) {
 }
 
 // Creates the tray icon right-click menu.
-void createTrayMenu(HMENU* trayMenu) {
-  *trayMenu = CreatePopupMenu();
-  AppendMenu(*trayMenu, MF_STRING | (isAutoStartEnabled() ? MF_CHECKED : MF_UNCHECKED),
-    AUTOSTART_ID, "Auto-start at login");
-  AppendMenu(*trayMenu, MF_SEPARATOR, 0, nullptr);
-  AppendMenu(*trayMenu, MF_STRING, SHOW_ALL_ID, "Restore all windows");
-  AppendMenu(*trayMenu, MF_STRING, EXIT_ID, "Exit");
+void createTrayMenu(TRCONTEXT* context) {
+  const UI_TEXT& text = uiText(context);
+  context->trayMenu = CreatePopupMenu();
+  AppendMenuW(context->trayMenu,
+    MF_STRING | (isAutoStartEnabled() ? MF_CHECKED : MF_UNCHECKED),
+    AUTOSTART_ID, text.autostart);
+  AppendMenuW(context->trayMenu, MF_STRING, LANGUAGE_ID, text.language);
+  AppendMenuW(context->trayMenu, MF_SEPARATOR, 0, nullptr);
+  AppendMenuW(context->trayMenu, MF_STRING, SHOW_ALL_ID, text.restoreAll);
+  AppendMenuW(context->trayMenu, MF_STRING, EXIT_ID, text.exit);
+}
+
+void refreshTrayMenuText(TRCONTEXT* context) {
+  const UI_TEXT& text = uiText(context);
+  ModifyMenuW(context->trayMenu, AUTOSTART_ID,
+    MF_BYCOMMAND | MF_STRING | (isAutoStartEnabled() ? MF_CHECKED : MF_UNCHECKED),
+    AUTOSTART_ID, text.autostart);
+  ModifyMenuW(context->trayMenu, LANGUAGE_ID, MF_BYCOMMAND | MF_STRING,
+    LANGUAGE_ID, text.language);
+  ModifyMenuW(context->trayMenu, SHOW_ALL_ID, MF_BYCOMMAND | MF_STRING,
+    SHOW_ALL_ID, text.restoreAll);
+  ModifyMenuW(context->trayMenu, EXIT_ID, MF_BYCOMMAND | MF_STRING,
+    EXIT_ID, text.exit);
 }
 
 // Shows all hidden windows.
 void showAllWindows(TRCONTEXT *context) {
   for (int i = 0; i < context->iconIndex; i++) {
-    if (context->icons[i].savedExStyle)
-      SetWindowLongPtr(context->icons[i].window, GWL_EXSTYLE,
-        context->icons[i].savedExStyle);
-    ShowWindow(context->icons[i].window, SW_SHOW);
-    Shell_NotifyIcon(NIM_DELETE, &context->icons[i].icon);
-    context->icons[i] = {};
+    restoreHiddenWindow(context, i, false);
   }
   save(context);
   context->iconIndex = 0;
@@ -392,13 +475,14 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
   switch (uMsg) {
   case WM_ICON:
     if (LOWORD(lParam) == WM_LBUTTONDBLCLK)
-      showWindow(context, lParam);
+      showWindow(context, trayCallbackIconId(wParam, lParam));
     break;
   case WM_OURICON:
     if (LOWORD(lParam) == WM_RBUTTONUP) {
       // Sync checkmark with actual task scheduler state before showing.
       CheckMenuItem(context->trayMenu, AUTOSTART_ID,
         MF_BYCOMMAND | (isAutoStartEnabled() ? MF_CHECKED : MF_UNCHECKED));
+      refreshTrayMenuText(context);
       SetForegroundWindow(hwnd);
       GetCursorPos(&pt);
       TrackPopupMenuEx(context->trayMenu,
@@ -411,6 +495,11 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
       switch (LOWORD(wParam)) {
       case SHOW_ALL_ID:
         showAllWindows(context);
+        break;
+      case LANGUAGE_ID:
+        context->chineseUi = !context->chineseUi;
+        saveChineseUi(context->chineseUi);
+        refreshTrayMenuText(context);
         break;
       case EXIT_ID:
         exitApp();
@@ -425,6 +514,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             MessageBox(NULL, "Failed to enable auto-start.", "Traymond",
               MB_OK | MB_ICONERROR);
         }
+        refreshTrayMenuText(context);
         break;
       }
     }
@@ -456,6 +546,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
   TRCONTEXT context = {};
   context.nextIconId = 1; // 1 is reserved for Traymond's own icon; hidden windows start at 2
+  context.chineseUi = loadChineseUi();
 
   // Mutex to allow only one instance
   const char szUniqueNamedMutex[] = "traymond_mutex";
@@ -491,7 +582,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
   }
 
   createTrayIcon(context.mainWindow, hInstance, &context);
-  createTrayMenu(&context.trayMenu);
+  createTrayMenu(&context);
   startup(&context);
 
   while ((bRet = GetMessage(&msg, 0, 0, 0)) != 0) {
